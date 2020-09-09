@@ -211,6 +211,8 @@ Example:
 	`s` is seconds (the default), `m` is milliseconds, and `S` is samples.
 * `resample [bandwidth] fs[k]`  
 	Sinc resampler. Ignores the channel selector.
+* `pae`  
+	Primary-ambient extraction using modified PCA. Work in progress.
 * `fir [~/]impulse_path`  
 	Non-partitioned 64-bit FFT convolution. Latency is equal to the length
 	of the impulse.

@@ -14,6 +14,7 @@
 #include "resample.h"
 #include "fir.h"
 #include "fir_p.h"
+#include "pae.h"
 #include "zita_convolver.h"
 #include "noise.h"
 #include "ladspa_host.h"
@@ -46,6 +47,7 @@ static struct effect_info effects[] = {
 #ifndef SYMMETRIC_IO
 	{ "resample",           "resample [bandwidth] fs[k]",              resample_effect_init,  0 },
 #endif
+	{ "pae",                "pae",                                     pae_effect_init,       0 },
 	{ "fir",                "fir [~/]impulse_path",                    fir_effect_init,       0 },
 	{ "fir_p",              "fir_p [min_part_len [max_part_len]] [~/]impulse_path", fir_p_effect_init, 0 },
 #endif
