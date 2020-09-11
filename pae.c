@@ -80,13 +80,14 @@ sample_t * pae_effect_run(struct effect *e, ssize_t *frames, sample_t *ibuf, sam
 					state->out_fr[3][i] = 0.0;
 					continue;
 				}
-				fftw_complex xh[2] = { conj(x[0]), conj(x[1]) };
-				fftw_complex r00 = xh[0]*x[0];
-				fftw_complex r11 = xh[1]*x[1];
-				fftw_complex r01 = xh[0]*x[1];
+				fftw_complex xh[2] = { conj(x[0]), conj(x[1]) };  /* hermitian transpose of x */
+				fftw_complex r00 = xh[0]*x[0];  /* autocorrelation of channel 0 */
+				fftw_complex r11 = xh[1]*x[1];  /* autocorrelation of channel 1 */
+				fftw_complex r01 = xh[0]*x[1];  /* cross-correlation of channels 0 and 1 */
 				PCA_DEBUG("r00    = %g%+gi\n", creal(r00), cimag(r00));
 				PCA_DEBUG("r11    = %g%+gi\n", creal(r11), cimag(r11));
 				PCA_DEBUG("r01    = %g%+gi\n", creal(r01), cimag(r01));
+				/* find two eigenvalues using the quadratic formula */
 				fftw_complex b = -r00-r11, c = r00*r11-r01*r01;
 				fftw_complex eig[2] = {
 					(-b + csqrt(b*b - 4.0*c)) / 2.0,
@@ -94,15 +95,19 @@ sample_t * pae_effect_run(struct effect *e, ssize_t *frames, sample_t *ibuf, sam
 				};
 				PCA_DEBUG("eig[0] = %g%+gi\n", creal(eig[0]), cimag(eig[0]));
 				PCA_DEBUG("eig[1] = %g%+gi\n", creal(eig[1]), cimag(eig[1]));
+				/* ratio of primary to ambient components */
 				double omega = creal(1.0 - cabs(eig[1]/eig[0]));
 				PCA_DEBUG("omega  = %g\n", omega);
 				if (omega < OMEGA_THRESHOLD) {
+					/* assume that there is no actual primary component for this
+					   time-frequency bin */
 					state->out_fr[0][i] = 0.0;
 					state->out_fr[1][i] = 0.0;
 					state->out_fr[2][i] = x[0];
 					state->out_fr[3][i] = x[1];
 				}
 				else {
+					/* calculate primary and ambient components */
 					fftw_complex k = (eig[0]-r00) / r01;
 					fftw_complex p0 = (x[0] + k*x[1]) / (1.0 + k*k);
 					fftw_complex p1 = k*p0;
