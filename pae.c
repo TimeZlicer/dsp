@@ -9,7 +9,8 @@
 
 #define CHUNK_LEN 4096
 #define CHUNK_FR_LEN (CHUNK_LEN / 2 + 1)
-#define OMEGA_THRESHOLD 0.7
+#define BAND_LEN ((CHUNK_FR_LEN-1) / 32)
+#define OMEGA_THRESHOLD 0.4
 
 #define DEBUG_PCA 0
 #if DEBUG_PCA
@@ -69,21 +70,28 @@ sample_t * pae_effect_run(struct effect *e, ssize_t *frames, sample_t *ibuf, sam
 					state->tmp[k] *= state->window[k];
 				fftw_execute(state->r2c_plan[i]);
 			}
+
 			/* Primary-ambient extraction using modified PCA */
 			/* TODO: detect inter-channel time differences */
-			for (i = 0; i < CHUNK_FR_LEN; ++i) {
-				fftw_complex x[2] = { state->in_fr[0][i], state->in_fr[1][i] };
-				if (x[0] == 0.0 && x[1] == 0.0) {
-					state->out_fr[0][i] = 0.0;
-					state->out_fr[1][i] = 0.0;
-					state->out_fr[2][i] = 0.0;
-					state->out_fr[3][i] = 0.0;
-					continue;
+			/* TODO: use a dynamic partitioning scheme */
+
+			/* Pass DC component directly */
+			state->out_fr[0][0] = state->in_fr[0][0];
+			state->out_fr[1][0] = state->in_fr[1][0];
+			state->out_fr[2][0] = 0.0;
+			state->out_fr[3][0] = 0.0;
+
+			for (i = 1; i < CHUNK_FR_LEN; i+=BAND_LEN) {
+				fftw_complex r00 = 0.0;  /* auto-correlation of channel 0 */
+				fftw_complex r11 = 0.0;  /* auto-correlation of channel 1 */
+				fftw_complex r01 = 0.0;  /* cross-correlation of channels 0 and 1 */
+				for (k = i; k < i+BAND_LEN; ++k) {
+					fftw_complex x0 = state->in_fr[0][k];
+					fftw_complex x1 = state->in_fr[1][k];
+					r00 += conj(x0)*x0;
+					r11 += conj(x1)*x1;
+					r01 += conj(x0)*x1;
 				}
-				fftw_complex xh[2] = { conj(x[0]), conj(x[1]) };  /* hermitian transpose of x */
-				fftw_complex r00 = xh[0]*x[0];  /* autocorrelation of channel 0 */
-				fftw_complex r11 = xh[1]*x[1];  /* autocorrelation of channel 1 */
-				fftw_complex r01 = xh[0]*x[1];  /* cross-correlation of channels 0 and 1 */
 				PCA_DEBUG("r00    = %g%+gi\n", creal(r00), cimag(r00));
 				PCA_DEBUG("r11    = %g%+gi\n", creal(r11), cimag(r11));
 				PCA_DEBUG("r01    = %g%+gi\n", creal(r01), cimag(r01));
@@ -99,27 +107,32 @@ sample_t * pae_effect_run(struct effect *e, ssize_t *frames, sample_t *ibuf, sam
 				double omega = creal(1.0 - cabs(eig[1]/eig[0]));
 				PCA_DEBUG("omega  = %g\n", omega);
 				if (omega < OMEGA_THRESHOLD) {
-					/* assume that there is no actual primary component for this
-					   time-frequency bin */
-					state->out_fr[0][i] = 0.0;
-					state->out_fr[1][i] = 0.0;
-					state->out_fr[2][i] = x[0];
-					state->out_fr[3][i] = x[1];
+					/* assume that there is no actual primary component for this band */
+					for (k = i; k < i+BAND_LEN; ++k) {
+						state->out_fr[0][k] = 0.0;
+						state->out_fr[1][k] = 0.0;
+						state->out_fr[2][k] = state->in_fr[0][k];
+						state->out_fr[3][k] = state->in_fr[1][k];
+					}
 				}
 				else {
 					/* calculate primary and ambient components */
-					fftw_complex k = (eig[0]-r00) / r01;
-					fftw_complex p0 = (x[0] + k*x[1]) / (1.0 + k*k);
-					fftw_complex p1 = k*p0;
-					fftw_complex a0 = k * (k*x[0] - x[1]) / (1.0 + k*k);
-					fftw_complex a1 = -a0/k;
+					for (k = i; k < i+BAND_LEN; ++k) {
+						fftw_complex x0 = state->in_fr[0][k];
+						fftw_complex x1 = state->in_fr[1][k];
+						fftw_complex pan = (r01 == 0.0) ? 1.0 : (eig[0]-r00) / r01;  /* panning factor */
+						fftw_complex p0 = (x0 + pan*x1) / (1.0 + pan*pan);
+						fftw_complex p1 = pan*p0;
+						fftw_complex a0 = pan * (pan*x0 - x1) / (1.0 + pan*pan);
+						fftw_complex a1 = -a0/pan;
 
-					state->out_fr[0][i] = p0;
-					state->out_fr[1][i] = p1;
-					state->out_fr[2][i] = a0;
-					state->out_fr[3][i] = a1;
-					PCA_DEBUG("p0=%g%+gi; p1=%g%+gi; a0=%g%+gi; a1=%g%+gi\n",
-						creal(p0), cimag(p0), creal(p1), cimag(p1), creal(a0), cimag(a0), creal(a1), cimag(a1));
+						state->out_fr[0][k] = p0;
+						state->out_fr[1][k] = p1;
+						state->out_fr[2][k] = a0;
+						state->out_fr[3][k] = a1;
+						PCA_DEBUG("p0=%g%+gi; p1=%g%+gi; a0=%g%+gi; a1=%g%+gi\n",
+							creal(p0), cimag(p0), creal(p1), cimag(p1), creal(a0), cimag(a0), creal(a1), cimag(a1));
+					}
 				}
 				PCA_DEBUG("---------------------------------\n\n");
 			}
