@@ -32,7 +32,7 @@
 
 struct pae_state {
 	int c0, c1, has_output, is_draining;
-	ssize_t in_buf_pos, out_buf_pos, drain_pos, drain_frames;
+	ssize_t in_buf_pos, out_buf_pos, um_buf_pos, drain_pos, drain_frames;
 	sample_t *window;
 	sample_t *input[2], *output[4], *tmp, **um_buf;
 	fftw_complex *in_fr[2], *out_fr[4];
@@ -57,8 +57,8 @@ sample_t * pae_effect_run(struct effect *e, ssize_t *frames, sample_t *ibuf, sam
 					state->input[1][state->in_buf_pos] = (ibuf) ? ibuf[iframes * e->istream.channels + i] : 0;
 				}
 				else {
-					obuf[oframes * e->ostream.channels + k] = (state->has_output) ? state->um_buf[j][state->out_buf_pos] : 0;
-					state->um_buf[j][state->in_buf_pos] = (ibuf) ? ibuf[iframes * e->istream.channels + i] : 0;
+					obuf[oframes * e->ostream.channels + k] = (state->has_output) ? state->um_buf[j][state->um_buf_pos] : 0;
+					state->um_buf[j][state->um_buf_pos] = (ibuf) ? ibuf[iframes * e->istream.channels + i] : 0;
 					++j;
 				}
 			}
@@ -71,6 +71,7 @@ sample_t * pae_effect_run(struct effect *e, ssize_t *frames, sample_t *ibuf, sam
 			++iframes;
 			++state->in_buf_pos;
 			++state->out_buf_pos;
+			state->um_buf_pos = (state->um_buf_pos + 1 == CHUNK_LEN) ? 0 : state->um_buf_pos + 1;
 		}
 
 		if (state->in_buf_pos == CHUNK_LEN) {
@@ -154,8 +155,6 @@ sample_t * pae_effect_run(struct effect *e, ssize_t *frames, sample_t *ibuf, sam
 				for (k = 0; k < CHUNK_LEN; ++k)
 					state->output[i][k] += state->tmp[k] / CHUNK_LEN * state->window[k];
 			}
-			for (i = 0; i < e->istream.channels - 2; ++i)
-				memmove(state->um_buf[i], &(state->um_buf[i][HOP]), (CHUNK_LEN - HOP) * sizeof(sample_t));
 			state->in_buf_pos = CHUNK_LEN - HOP;
 			state->out_buf_pos = 0;
 			state->has_output = 1;
@@ -177,6 +176,7 @@ void pae_effect_reset(struct effect *e)
 	struct pae_state *state = (struct pae_state *) e->data;
 	state->in_buf_pos = 0;
 	state->out_buf_pos = 0;
+	state->um_buf_pos = 0;
 	state->has_output = 0;
 	for (i = 0; i < 4; ++i)
 		memset(state->output[i], 0, CHUNK_LEN * sizeof(sample_t));
