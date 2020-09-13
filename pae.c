@@ -118,7 +118,16 @@ sample_t * pae_effect_run(struct effect *e, ssize_t *frames, sample_t *ibuf, sam
 				/* ratio of primary to ambient components */
 				double omega = creal(1.0 - cabs(eig[1]/eig[0]));
 				PCA_DEBUG("omega  = %g\n", omega);
-				if (omega < OMEGA_THRESHOLD) {
+				if (r01 == 0.0 && (r00 == 0.0 || r11 == 0.0)) {
+					/* only the primary component is present and is hard panned */
+					for (k = i; k < i+BAND_LEN; ++k) {
+						state->out_fr[0][k] = state->in_fr[0][k];
+						state->out_fr[1][k] = state->in_fr[1][k];
+						state->out_fr[2][k] = 0.0;
+						state->out_fr[3][k] = 0.0;
+					}
+				}
+				else if (omega < OMEGA_THRESHOLD) {
 					/* assume that there is no actual primary component for this band */
 					for (k = i; k < i+BAND_LEN; ++k) {
 						state->out_fr[0][k] = 0.0;
@@ -129,10 +138,10 @@ sample_t * pae_effect_run(struct effect *e, ssize_t *frames, sample_t *ibuf, sam
 				}
 				else {
 					/* calculate primary and ambient components */
+					fftw_complex pan = (eig[0]-r00) / r01;  /* panning factor */
 					for (k = i; k < i+BAND_LEN; ++k) {
 						fftw_complex x0 = state->in_fr[0][k];
 						fftw_complex x1 = state->in_fr[1][k];
-						fftw_complex pan = (r01 == 0.0) ? 1.0 : (eig[0]-r00) / r01;  /* panning factor */
 						fftw_complex p0 = (x0 + pan*x1) / (1.0 + pan*pan);
 						fftw_complex p1 = pan*p0;
 						fftw_complex a0 = pan * (pan*x0 - x1) / (1.0 + pan*pan);
