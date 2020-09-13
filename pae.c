@@ -8,6 +8,7 @@
 #include "util.h"
 
 #define CHUNK_LEN 4096
+#define OVERLAP 75
 #define CHUNK_FR_LEN (CHUNK_LEN / 2 + 1)
 #define BAND_LEN ((CHUNK_FR_LEN-1) / 32)
 #define OMEGA_THRESHOLD 0.4
@@ -17,6 +18,16 @@
 	#define PCA_DEBUG(...) fprintf(stderr, __VA_ARGS__)
 #else
 	#define PCA_DEBUG(...)
+#endif
+
+#if OVERLAP == 75
+	#define HOP (CHUNK_LEN / 4)
+	#define WINDOW_NORM 0.5
+#elif OVERLAP == 50
+	#define HOP (CHUNK_LEN / 2)
+	#define WINDOW_NORM 1.0
+#else
+	#error "invalid OVERLAP"
 #endif
 
 struct pae_state {
@@ -65,7 +76,7 @@ sample_t * pae_effect_run(struct effect *e, ssize_t *frames, sample_t *ibuf, sam
 		if (state->in_buf_pos == CHUNK_LEN) {
 			for (i = 0; i < 2; ++i) {
 				memcpy(state->tmp, state->input[i], CHUNK_LEN * sizeof(sample_t));
-				memcpy(state->input[i], &(state->input[i][CHUNK_LEN / 2]), CHUNK_LEN / 2 * sizeof(sample_t));
+				memmove(state->input[i], &(state->input[i][HOP]), (CHUNK_LEN - HOP) * sizeof(sample_t));
 				for (k = 0; k < CHUNK_LEN; ++k)
 					state->tmp[k] *= state->window[k];
 				fftw_execute(state->r2c_plan[i]);
@@ -137,15 +148,15 @@ sample_t * pae_effect_run(struct effect *e, ssize_t *frames, sample_t *ibuf, sam
 				PCA_DEBUG("---------------------------------\n\n");
 			}
 			for (i = 0; i < 4; ++i) {
-				memcpy(state->output[i], &(state->output[i][CHUNK_LEN / 2]), CHUNK_LEN / 2 * sizeof(sample_t));
-				memset(&(state->output[i][CHUNK_LEN / 2]), 0, CHUNK_LEN / 2 * sizeof(sample_t));
+				memmove(state->output[i], &(state->output[i][HOP]), (CHUNK_LEN - HOP) * sizeof(sample_t));
+				memset(&(state->output[i][CHUNK_LEN - HOP]), 0, HOP * sizeof(sample_t));
 				fftw_execute(state->c2r_plan[i]);
 				for (k = 0; k < CHUNK_LEN; ++k)
 					state->output[i][k] += state->tmp[k] / CHUNK_LEN * state->window[k];
 			}
 			for (i = 0; i < e->istream.channels - 2; ++i)
-				memcpy(state->um_buf[i], &(state->um_buf[i][CHUNK_LEN / 2]), CHUNK_LEN / 2 * sizeof(sample_t));
-			state->in_buf_pos = CHUNK_LEN / 2;
+				memmove(state->um_buf[i], &(state->um_buf[i][HOP]), (CHUNK_LEN - HOP) * sizeof(sample_t));
+			state->in_buf_pos = CHUNK_LEN - HOP;
 			state->out_buf_pos = 0;
 			state->has_output = 1;
 		}
@@ -180,9 +191,9 @@ void pae_effect_drain(struct effect *e, ssize_t *frames, sample_t *obuf)
 		*frames = -1;
 	else {
 		if (!state->is_draining) {
-			state->drain_frames = CHUNK_LEN/2;
+			state->drain_frames = HOP;
 			if (state->has_output)
-				state->drain_frames += CHUNK_LEN/2 - state->out_buf_pos;
+				state->drain_frames += CHUNK_LEN - HOP - state->out_buf_pos;
 			state->drain_frames += state->out_buf_pos;
 			state->is_draining = 1;
 		}
@@ -261,7 +272,7 @@ struct effect * pae_effect_init(struct effect_info *ei, struct stream_info *istr
 	}
 	state->window = calloc(CHUNK_LEN, sizeof(sample_t));
 	for (i = 0; i < CHUNK_LEN; ++i)
-		state->window[i] = sqrt(0.5 * (1.0 - cos(2.0*M_PI*i / CHUNK_LEN)));  /* root-hann (MLT sine) window */
+		state->window[i] = sqrt(WINDOW_NORM * 0.5 * (1.0 - cos(2.0*M_PI*i / CHUNK_LEN)));  /* root-hann window */
 	state->tmp = fftw_malloc(CHUNK_LEN * sizeof(sample_t));
 	memset(state->tmp, 0, CHUNK_LEN * sizeof(sample_t));
 	for (i = 0; i < 2; ++i) {
