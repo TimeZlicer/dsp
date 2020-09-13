@@ -212,7 +212,8 @@ Example:
 * `resample [bandwidth] fs[k]`  
 	Sinc resampler. Ignores the channel selector.
 * `pae`  
-	Primary-ambient extraction using modified PCA. Work in progress.
+	Primary-ambient extraction using modified PCA. Work in progress. Currently
+	only supports 44.1kHz and 48kHz sample rates.
 * `fir [~/]impulse_path`  
 	Non-partitioned 64-bit FFT convolution. Latency is equal to the length
 	of the impulse.
