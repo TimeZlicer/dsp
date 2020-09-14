@@ -4,6 +4,9 @@
 #include <math.h>
 #include <complex.h>
 #include <fftw3.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #include "pae.h"
 #include "util.h"
 
@@ -42,7 +45,6 @@
 #endif
 
 struct time_shift {
-	fftw_complex *in_fr;
 	fftw_complex r00, r11, r01, eig0, eig1;
 	double weight;
 };
@@ -53,9 +55,93 @@ struct pae_state {
 	sample_t *window;
 	sample_t *input[2], *output[4], *tmp, **um_buf;
 	fftw_complex *in_fr[2], *out_fr[4];
-	struct time_shift time_shift[N_SHIFT*2+1];
 	fftw_plan r2c_plan[2], c2r_plan[4];
 };
+
+static void process_chunk_mspca(struct effect *e, struct pae_state *state, ssize_t start)
+{
+	struct time_shift ts[N_SHIFT*2+1];
+	ssize_t k, j;
+	/* Calculate correlations, eigenvalues, and weights for each time shift */
+	double weight_sum = 0.0;
+	for (j = 0; j < N_SHIFT*2+1; ++j) {
+		double delay = ((double) j - N_SHIFT) / e->istream.fs * SHIFT_STEP;  /* time delay in seconds */
+		ts[j].r00 = 0.0;  /* auto-correlation of channel 0 */
+		ts[j].r11 = 0.0;  /* auto-correlation of channel 1 */
+		ts[j].r01 = 0.0;  /* cross-correlation of channels 0 and 1 */
+		for (k = start; k < start+BAND_LEN; ++k) {
+			double f = (double) k / PAD_CHUNK_LEN * e->istream.fs;
+			fftw_complex x0 = FD_DELAY(state->in_fr[0][k], f, delay);
+			fftw_complex x1 = state->in_fr[1][k];
+			ts[j].r00 += conj(x0)*x0;
+			ts[j].r11 += conj(x1)*x1;
+			ts[j].r01 += conj(x0)*x1;
+		}
+		PCA_DEBUG("r00    = %g%+gi\n", creal(ts[j].r00), cimag(ts[j].r00));
+		PCA_DEBUG("r11    = %g%+gi\n", creal(ts[j].r11), cimag(ts[j].r11));
+		PCA_DEBUG("r01    = %g%+gi\n", creal(ts[j].r01), cimag(ts[j].r01));
+		/* Find two eigenvalues using the quadratic formula */
+		fftw_complex b = -(ts[j].r00)-(ts[j].r11), c = (ts[j].r00)*(ts[j].r11)-(ts[j].r01)*(ts[j].r01);
+		ts[j].eig0 = (-b + csqrt(b*b - 4.0*c)) / 2.0;
+		ts[j].eig1 = (-b - csqrt(b*b - 4.0*c)) / 2.0;
+		PCA_DEBUG("eig0   = %g%+gi\n", creal(ts[j].eig0), cimag(ts[j].eig0));
+		PCA_DEBUG("eig1   = %g%+gi\n", creal(ts[j].eig1), cimag(ts[j].eig1));
+		ts[j].weight = pow(creal(ts[j].r01), SHIFT_WEIGHT);
+		weight_sum += ts[j].weight;
+	}
+	/* Normalize weights */
+	for (j = 0; j < N_SHIFT*2+1; ++j) {
+		ts[j].weight /= weight_sum;
+		PCA_DEBUG("weight[%zd] = %g\n", j, ts[j].weight);
+	}
+	/* Zero the output arrays */
+	for (k = start; k < start+BAND_LEN; ++k) {
+		state->out_fr[0][k] = 0.0;
+		state->out_fr[1][k] = 0.0;
+		state->out_fr[2][k] = 0.0;
+		state->out_fr[3][k] = 0.0;
+	}
+	for (j = 0; j < N_SHIFT*2+1; ++j) {
+		double delay = ((double) j - N_SHIFT) / e->istream.fs * SHIFT_STEP;  /* time delay in seconds */
+		double omega = creal(1.0 - cabs((ts[j].eig1)/(ts[j].eig0))); /* ratio of primary to ambient components */
+		PCA_DEBUG("omega  = %g\n", omega);
+		if (ts[j].r01 == 0.0 && (ts[j].r00 == 0.0 || ts[j].r11 == 0.0)) {
+			/* Only the primary component is present and is hard panned */
+			for (k = start; k < start+BAND_LEN; ++k) {
+				state->out_fr[0][k] += state->in_fr[0][k] * ts[j].weight;
+				state->out_fr[1][k] += state->in_fr[1][k] * ts[j].weight;
+			}
+		}
+		else if (omega < OMEGA_THRESHOLD) {
+			/* Assume that there is no actual primary component for this band */
+			for (k = start; k < start+BAND_LEN; ++k) {
+				state->out_fr[2][k] += state->in_fr[0][k] * ts[j].weight;
+				state->out_fr[3][k] += state->in_fr[1][k] * ts[j].weight;
+			}
+		}
+		else {
+			/* Calculate primary and ambient components */
+			fftw_complex pan = ((ts[j].eig0)-(ts[j].r00)) / (ts[j].r01);  /* panning factor */
+			for (k = start; k < start+BAND_LEN; ++k) {
+				double f = (double) k / PAD_CHUNK_LEN * e->istream.fs;
+				fftw_complex x0 = FD_DELAY(state->in_fr[0][k], f, delay);
+				fftw_complex x1 = state->in_fr[1][k];
+				fftw_complex p0 = (x0 + pan*x1) / (1.0 + pan*pan);
+				fftw_complex p1 = pan*p0;
+				fftw_complex a0 = pan * (pan*x0 - x1) / (1.0 + pan*pan);
+				fftw_complex a1 = -a0/pan;
+
+				state->out_fr[0][k] += FD_DELAY(p0, f, -delay) * ts[j].weight;
+				state->out_fr[1][k] += p1 * ts[j].weight;
+				state->out_fr[2][k] += FD_DELAY(a0, f, -delay) * ts[j].weight;
+				state->out_fr[3][k] += a1 * ts[j].weight;
+				PCA_DEBUG("p0=%g%+gi; p1=%g%+gi; a0=%g%+gi; a1=%g%+gi\n",
+					creal(p0), cimag(p0), creal(p1), cimag(p1), creal(a0), cimag(a0), creal(a1), cimag(a1));
+			}
+		}
+	}
+	PCA_DEBUG("---------------------------------\n\n");
+}
 
 sample_t * pae_effect_run(struct effect *e, ssize_t *frames, sample_t *ibuf, sample_t *obuf)
 {
@@ -80,12 +166,12 @@ sample_t * pae_effect_run(struct effect *e, ssize_t *frames, sample_t *ibuf, sam
 					++j;
 				}
 			}
-#ifdef SYMMETRIC_IO
-			++oframes;
-#else
-			if (state->has_output)
+			#ifdef SYMMETRIC_IO
 				++oframes;
-#endif
+			#else
+				if (state->has_output)
+					++oframes;
+			#endif
 			++iframes;
 			++state->in_buf_pos;
 			++state->out_buf_pos;
@@ -111,89 +197,12 @@ sample_t * pae_effect_run(struct effect *e, ssize_t *frames, sample_t *ibuf, sam
 			state->out_fr[2][0] = 0.0;
 			state->out_fr[3][0] = 0.0;
 
-			for (i = 1; i < CHUNK_FR_LEN; i+=BAND_LEN) {
-				/* Calculate correlations, eigenvalues, and weights for each time shift */
-				double weight_sum = 0.0;
-				for (j = 0; j < N_SHIFT*2+1; ++j) {
-					struct time_shift *ts = &(state->time_shift[j]);
-					double delay = ((double) j - N_SHIFT) / e->istream.fs * SHIFT_STEP;  /* time delay in seconds */
-					ts->r00 = 0.0;  /* auto-correlation of channel 0 */
-					ts->r11 = 0.0;  /* auto-correlation of channel 1 */
-					ts->r01 = 0.0;  /* cross-correlation of channels 0 and 1 */
-					for (k = i; k < i+BAND_LEN; ++k) {
-						double f = (double) k / PAD_CHUNK_LEN * e->istream.fs;
-						fftw_complex x0 = FD_DELAY(state->in_fr[0][k], f, delay);
-						fftw_complex x1 = state->in_fr[1][k];
-						ts->r00 += conj(x0)*x0;
-						ts->r11 += conj(x1)*x1;
-						ts->r01 += conj(x0)*x1;
-					}
-					PCA_DEBUG("r00    = %g%+gi\n", creal(ts->r00), cimag(ts->r00));
-					PCA_DEBUG("r11    = %g%+gi\n", creal(ts->r11), cimag(ts->r11));
-					PCA_DEBUG("r01    = %g%+gi\n", creal(ts->r01), cimag(ts->r01));
-					/* Find two eigenvalues using the quadratic formula */
-					fftw_complex b = -(ts->r00)-(ts->r11), c = (ts->r00)*(ts->r11)-(ts->r01)*(ts->r01);
-					ts->eig0 = (-b + csqrt(b*b - 4.0*c)) / 2.0;
-					ts->eig1 = (-b - csqrt(b*b - 4.0*c)) / 2.0;
-					PCA_DEBUG("eig0   = %g%+gi\n", creal(ts->eig0), cimag(ts->eig0));
-					PCA_DEBUG("eig1   = %g%+gi\n", creal(ts->eig1), cimag(ts->eig1));
-					ts->weight = pow(creal(ts->r01), SHIFT_WEIGHT);
-					weight_sum += ts->weight;
-				}
-				/* Normalize weights */
-				for (j = 0; j < N_SHIFT*2+1; ++j) {
-					state->time_shift[j].weight /= weight_sum;
-					PCA_DEBUG("weight[%zd] = %g\n", j, state->time_shift[j].weight);
-				}
-				/* Zero the output arrays */
-				for (k = i; k < i+BAND_LEN; ++k) {
-					state->out_fr[0][k] = 0.0;
-					state->out_fr[1][k] = 0.0;
-					state->out_fr[2][k] = 0.0;
-					state->out_fr[3][k] = 0.0;
-				}
-				for (j = 0; j < N_SHIFT*2+1; ++j) {
-					struct time_shift *ts = &(state->time_shift[j]);
-					double delay = ((double) j - N_SHIFT) / e->istream.fs * SHIFT_STEP;  /* time delay in seconds */
-					double omega = creal(1.0 - cabs((ts->eig1)/(ts->eig0))); /* ratio of primary to ambient components */
-					PCA_DEBUG("omega  = %g\n", omega);
-					if (ts->r01 == 0.0 && (ts->r00 == 0.0 || ts->r11 == 0.0)) {
-						/* Only the primary component is present and is hard panned */
-						for (k = i; k < i+BAND_LEN; ++k) {
-							state->out_fr[0][k] += state->in_fr[0][k] * ts->weight;
-							state->out_fr[1][k] += state->in_fr[1][k] * ts->weight;
-						}
-					}
-					else if (omega < OMEGA_THRESHOLD) {
-						/* Assume that there is no actual primary component for this band */
-						for (k = i; k < i+BAND_LEN; ++k) {
-							state->out_fr[2][k] += state->in_fr[0][k] * ts->weight;
-							state->out_fr[3][k] += state->in_fr[1][k] * ts->weight;
-						}
-					}
-					else {
-						/* Calculate primary and ambient components */
-						fftw_complex pan = ((ts->eig0)-(ts->r00)) / (ts->r01);  /* panning factor */
-						for (k = i; k < i+BAND_LEN; ++k) {
-							double f = (double) k / PAD_CHUNK_LEN * e->istream.fs;
-							fftw_complex x0 = FD_DELAY(state->in_fr[0][k], f, delay);
-							fftw_complex x1 = state->in_fr[1][k];
-							fftw_complex p0 = (x0 + pan*x1) / (1.0 + pan*pan);
-							fftw_complex p1 = pan*p0;
-							fftw_complex a0 = pan * (pan*x0 - x1) / (1.0 + pan*pan);
-							fftw_complex a1 = -a0/pan;
+			#if defined(_OPENMP) && !(DEBUG_PCA)
+				#pragma omp parallel for schedule(static)
+			#endif
+			for (i = 0; i < N_BANDS; ++i)
+				process_chunk_mspca(e, state, i*BAND_LEN + 1);
 
-							state->out_fr[0][k] += FD_DELAY(p0, f, -delay) * ts->weight;
-							state->out_fr[1][k] += p1 * ts->weight;
-							state->out_fr[2][k] += FD_DELAY(a0, f, -delay) * ts->weight;
-							state->out_fr[3][k] += a1 * ts->weight;
-							PCA_DEBUG("p0=%g%+gi; p1=%g%+gi; a0=%g%+gi; a1=%g%+gi\n",
-								creal(p0), cimag(p0), creal(p1), cimag(p1), creal(a0), cimag(a0), creal(a1), cimag(a1));
-						}
-					}
-				}
-				PCA_DEBUG("---------------------------------\n\n");
-			}
 			for (i = 0; i < 4; ++i) {
 				memmove(state->output[i], &(state->output[i][HOP]), (CHUNK_LEN - HOP) * sizeof(sample_t));
 				memset(&(state->output[i][CHUNK_LEN - HOP]), 0, HOP * sizeof(sample_t));
@@ -269,8 +278,6 @@ void pae_effect_destroy(struct effect *e)
 		fftw_free(state->out_fr[i]);
 		fftw_free(state->c2r_plan[i]);
 	}
-	for (i = 0; i < N_SHIFT*2+1; ++i)
-		fftw_free(state->time_shift[i].in_fr);
 	for (i = 0; i < e->istream.channels - 2; ++i)
 		free(state->um_buf[i]);
 	free(state->um_buf);
@@ -341,8 +348,6 @@ struct effect * pae_effect_init(struct effect_info *ei, struct stream_info *istr
 		memset(state->out_fr[i], 0, CHUNK_FR_LEN * sizeof(fftw_complex));
 		state->c2r_plan[i] = fftw_plan_dft_c2r_1d(PAD_CHUNK_LEN, state->out_fr[i], state->tmp, FFTW_ESTIMATE);
 	}
-	for (i = 0; i < N_SHIFT*2+1; ++i)
-		state->time_shift[i].in_fr = fftw_malloc(BAND_LEN * sizeof(fftw_complex));
 	if (e->istream.channels > 2) {
 		state->um_buf = calloc(e->istream.channels - 2, sizeof(sample_t *));
 		for (i = 0; i < e->istream.channels - 2; ++i)

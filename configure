@@ -20,6 +20,7 @@ Options:
   --disable-ao
   --disable-mad
   --disable-pulse
+  --disable-openmp
   --disable-ladspa_dsp
   --debug-build
   --prefix=path (default: $PREFIX)
@@ -49,6 +50,7 @@ for i in "$@"; do
 		--disable-ao)             CONFIG_DISABLE_AO=y ;;
 		--disable-mad)            CONFIG_DISABLE_MAD=y ;;
 		--disable-pulse)          CONFIG_DISABLE_PULSE=y ;;
+		--disable-openmp)         CONFIG_DISABLE_OPENMP=y ;;
 		--disable-ladspa_dsp)     CONFIG_DISABLE_LADSPA_DSP=y ;;
 		--debug-build)            CONFIG_DEBUG_BUILD=y ;;
 		--prefix=*)               PREFIX="${i#--prefix=}" ;;
@@ -129,6 +131,13 @@ if [ "$CONFIG_DISABLE_DSP" != "y" ]; then
 	check_pkg_dsp ao "$CONFIG_DISABLE_AO" ao.o -DHAVE_AO
 	check_pkg_dsp mad "$CONFIG_DISABLE_MAD" mp3.o -DHAVE_MAD
 	check_pkg_dsp libpulse-simple "$CONFIG_DISABLE_PULSE" pulse.o -DHAVE_PULSE
+	if [ "$CONFIG_DISABLE_OPENMP" != "y" ] && check_header omp.h; then
+		DSP_EXTRA_CFLAGS="$DSP_EXTRA_CFLAGS -fopenmp"
+		DSP_EXTRA_LIBS="$DSP_EXTRA_LIBS -fopenmp"
+		echo "[dsp] enabled OpenMP for pae.o"
+	else
+		echo "[dsp] disabled OpenMP for pae.o"
+	fi
 else
 	echo "disabled dsp"
 fi
@@ -166,6 +175,13 @@ if [ "$CONFIG_DISABLE_LADSPA_DSP" != "y" ] && check_header ladspa.h; then
 		#LADSPA_DSP_OPTIONAL_OBJECTS="$LADSPA_DSP_OPTIONAL_OBJECTS null.o pcm.o"
 		#check_pkg_ladspa_dsp "libavcodec libavformat libavutil" "$CONFIG_DISABLE_FFMPEG" ffmpeg.o -DHAVE_FFMPEG
 		#check_pkg_ladspa_dsp mad "$CONFIG_DISABLE_MAD" mp3.o -DHAVE_MAD
+	fi
+	if [ "$CONFIG_DISABLE_OPENMP" != "y" ] && check_header omp.h; then
+		LADSPA_DSP_EXTRA_CFLAGS="$LADSPA_DSP_EXTRA_CFLAGS -fopenmp"
+		LADSPA_DSP_EXTRA_LIBS="$LADSPA_DSP_EXTRA_LIBS -fopenmp"
+		echo "[ladspa_dsp] enabled OpenMP for pae.o"
+	else
+		echo "[ladspa_dsp] disabled OpenMP for pae.o"
 	fi
 else
 	echo "disabled ladspa_dsp"
