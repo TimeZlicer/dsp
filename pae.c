@@ -13,7 +13,7 @@
 #define PAD_CHUNK_LEN 4096   /* zero-padded chunk length */
 #define SHIFT_STEP       2
 #define N_SHIFT         22   /* ±samples*SHIFT_STEP (must be even if OVERLAP==75) */
-#define SHIFT_WEIGHT     4   /* must be an even integer >=2 */
+#define SHIFT_WEIGHT     8   /* must be an even integer >=2 */
 #define OVERLAP         75   /* window overlap; 50% and 75% are supported */
 #define N_BANDS         32
 #define OMEGA_THRESHOLD 0.3
