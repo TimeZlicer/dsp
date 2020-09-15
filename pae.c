@@ -10,13 +10,13 @@
 #include "pae.h"
 #include "util.h"
 
-#define PAD_CHUNK_LEN 4096   /* zero-padded chunk length */
-#define SHIFT_STEP       2
-#define N_SHIFT         22   /* ±samples*SHIFT_STEP (must be even if OVERLAP==75) */
-#define SHIFT_WEIGHT     8   /* must be an even integer >=2 */
-#define OVERLAP         75   /* window overlap; 50% and 75% are supported */
-#define N_BANDS         32
-#define OMEGA_THRESHOLD 0.3
+#define PAD_CHUNK_LEN   4096   /* zero-padded chunk length */
+#define SHIFT_STEP         1
+#define N_SHIFT           26   /* ±samples*SHIFT_STEP (must be even if OVERLAP==75) */
+#define SHIFT_WEIGHT       4   /* must be an even integer >=2 */
+#define OVERLAP           50   /* window overlap; 50% and 75% are supported */
+#define N_BANDS           32
+#define OMEGA_THRESHOLD  0.2
 
 #define DEBUG_PCA 0
 #if DEBUG_PCA
@@ -38,10 +38,10 @@
 #define CHUNK_LEN (PAD_CHUNK_LEN - N_SHIFT*SHIFT_STEP*2)
 #define CHUNK_FR_LEN (PAD_CHUNK_LEN / 2 + 1)
 #define BAND_LEN ((CHUNK_FR_LEN-1) / N_BANDS)
-#if N_SHIFT == 0
-	#define FD_DELAY(x, f, t) (x)
-#else
+#if N_SHIFT > 0
 	#define FD_DELAY(x, f, t) ((x)*cexp(-(I*2.0*M_PI*(f)*(t))))
+#else
+	#define FD_DELAY(x, f, t) (x)
 #endif
 
 struct time_shift {
@@ -65,12 +65,16 @@ static void process_chunk_mspca(struct effect *e, struct pae_state *state, ssize
 	/* Calculate correlations, eigenvalues, and weights for each time shift */
 	double weight_sum = 0.0;
 	for (j = 0; j < N_SHIFT*2+1; ++j) {
-		double delay = ((double) j - N_SHIFT) / e->istream.fs * SHIFT_STEP;  /* time delay in seconds */
+		#if N_SHIFT > 0
+			double delay = ((double) j - N_SHIFT) / e->istream.fs * SHIFT_STEP;  /* time delay in seconds */
+		#endif
 		ts[j].r00 = 0.0;  /* auto-correlation of channel 0 */
 		ts[j].r11 = 0.0;  /* auto-correlation of channel 1 */
 		ts[j].r01 = 0.0;  /* cross-correlation of channels 0 and 1 */
 		for (k = start; k < start+BAND_LEN; ++k) {
-			double f = (double) k / PAD_CHUNK_LEN * e->istream.fs;
+			#if N_SHIFT > 0
+				double f = (double) k / PAD_CHUNK_LEN * e->istream.fs;
+			#endif
 			fftw_complex x0 = FD_DELAY(state->in_fr[0][k], f, delay);
 			fftw_complex x1 = state->in_fr[1][k];
 			ts[j].r00 += conj(x0)*x0;
@@ -80,12 +84,6 @@ static void process_chunk_mspca(struct effect *e, struct pae_state *state, ssize
 		PCA_DEBUG("r00    = %g%+gi\n", creal(ts[j].r00), cimag(ts[j].r00));
 		PCA_DEBUG("r11    = %g%+gi\n", creal(ts[j].r11), cimag(ts[j].r11));
 		PCA_DEBUG("r01    = %g%+gi\n", creal(ts[j].r01), cimag(ts[j].r01));
-		/* Find two eigenvalues using the quadratic formula */
-		fftw_complex b = -(ts[j].r00)-(ts[j].r11), c = (ts[j].r00)*(ts[j].r11)-(ts[j].r01)*(ts[j].r01);
-		ts[j].eig0 = (-b + csqrt(b*b - 4.0*c)) / 2.0;
-		ts[j].eig1 = (-b - csqrt(b*b - 4.0*c)) / 2.0;
-		PCA_DEBUG("eig0   = %g%+gi\n", creal(ts[j].eig0), cimag(ts[j].eig0));
-		PCA_DEBUG("eig1   = %g%+gi\n", creal(ts[j].eig1), cimag(ts[j].eig1));
 		ts[j].weight = pow(creal(ts[j].r01), SHIFT_WEIGHT);
 		weight_sum += ts[j].weight;
 	}
@@ -102,8 +100,16 @@ static void process_chunk_mspca(struct effect *e, struct pae_state *state, ssize
 		state->out_fr[3][k] = 0.0;
 	}
 	for (j = 0; j < N_SHIFT*2+1; ++j) {
-		double delay = ((double) j - N_SHIFT) / e->istream.fs * SHIFT_STEP;  /* time delay in seconds */
-		double omega = creal(1.0 - cabs((ts[j].eig1)/(ts[j].eig0))); /* ratio of primary to ambient components */
+		/* Find two eigenvalues using the quadratic formula */
+		fftw_complex b = -(ts[j].r00)-(ts[j].r11), c = (ts[j].r00)*(ts[j].r11)-(ts[j].r01)*(ts[j].r01);
+		ts[j].eig0 = (-b + csqrt(b*b - 4.0*c)) / 2.0;
+		ts[j].eig1 = (-b - csqrt(b*b - 4.0*c)) / 2.0;
+		PCA_DEBUG("eig0   = %g%+gi\n", creal(ts[j].eig0), cimag(ts[j].eig0));
+		PCA_DEBUG("eig1   = %g%+gi\n", creal(ts[j].eig1), cimag(ts[j].eig1));
+		#if N_SHIFT > 0
+			double delay = ((double) j - N_SHIFT) / e->istream.fs * SHIFT_STEP;  /* time delay in seconds */
+		#endif
+		double omega = 1.0 - fabs(creal((ts[j].eig1)/(ts[j].eig0))); /* ratio of primary to ambient components */
 		PCA_DEBUG("omega  = %g\n", omega);
 		if (ts[j].r01 == 0.0 && (ts[j].r00 == 0.0 || ts[j].r11 == 0.0)) {
 			/* Only the primary component is present and is hard panned */
@@ -123,7 +129,9 @@ static void process_chunk_mspca(struct effect *e, struct pae_state *state, ssize
 			/* Calculate primary and ambient components */
 			fftw_complex pan = ((ts[j].eig0)-(ts[j].r00)) / (ts[j].r01);  /* panning factor */
 			for (k = start; k < start+BAND_LEN; ++k) {
-				double f = (double) k / PAD_CHUNK_LEN * e->istream.fs;
+				#if N_SHIFT > 0
+					double f = (double) k / PAD_CHUNK_LEN * e->istream.fs;
+				#endif
 				fftw_complex x0 = FD_DELAY(state->in_fr[0][k], f, delay);
 				fftw_complex x1 = state->in_fr[1][k];
 				fftw_complex p0 = (x0 + pan*x1) / (1.0 + pan*pan);
@@ -197,7 +205,7 @@ sample_t * pae_effect_run(struct effect *e, ssize_t *frames, sample_t *ibuf, sam
 			state->out_fr[2][0] = 0.0;
 			state->out_fr[3][0] = 0.0;
 
-			#if defined(_OPENMP) && !(DEBUG_PCA)
+			#if defined(_OPENMP) && !(DEBUG_PCA) && N_SHIFT>0
 				#pragma omp parallel for schedule(static)
 			#endif
 			for (i = 0; i < N_BANDS; ++i)
